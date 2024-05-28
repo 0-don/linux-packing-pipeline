@@ -1,0 +1,127 @@
+name: "publish"
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+env:
+  ARCH: x86_64
+  NAME: clippy
+  VERSION: 1.2.3
+  DESCRIPTION: "A clipboard manager for Linux"
+  LICENSE: MIT
+  DEPENDENCIES_ARCH: "'libappindicator-gtk3' 'webkit2gtk' 'gtk3' 'xdotool'"
+  DEPENDENCIES_RPM: "javascriptcoregtk4.0, webkit2gtk4.0, libxdo, libappindicator-gtk3, xdotool"
+  DEB_PKG_PATH: ./ # Assuming this is static, else you can construct it similarly
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      name_bin: ${{ env.NAME }}-bin
+      deb_pkg_name: ${{ env.NAME }}_${{ env.VERSION }}_amd64.deb
+      deb_pkg_renamed: ${{ env.NAME }}-${{ env.VERSION }}-${{ env.ARCH }}.deb
+      arch_pkg_name: ${{ env.NAME }}-bin-${{ env.VERSION }}-1-${{ env.ARCH }}.pkg.tar.zst
+      rpm_pkg_name: RPMS/${{ env.NAME }}-${{ env.VERSION }}-1.${{ env.ARCH }}.rpm
+      folder_name: ${{ env.NAME }}-${{ env.VERSION }}
+    steps:
+      - uses: actions/checkout@v4
+
+  publish-release:
+    needs: setup
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: copy deb package && create PKGBUILD file
+        run: |
+          mkdir -p ${{ needs.setup.outputs.name_bin }}
+          cp -fr ${{ env.DEB_PKG_PATH }}/${{ needs.setup.outputs.deb_pkg_name}} ${{ needs.setup.outputs.name_bin }}/${{ needs.setup.outputs.deb_pkg_renamed }}
+          cat <<EOF > ./${{ needs.setup.outputs.name_bin }}/PKGBUILD
+            pkgname=${{ needs.setup.outputs.name_bin }}
+            pkgver=${{ env.VERSION }}
+            md5sums=('$(md5sum ${{ needs.setup.outputs.name_bin }}/${{ needs.setup.outputs.deb_pkg_renamed }}  | awk '{print $1}')')
+            pkgrel=1
+            depends=(${{ env.DEPENDENCIES_ARCH }})
+            pkgdesc='${{ env.DESCRIPTION }}'
+            arch=('${{ env.ARCH }}')
+            url="https://github.com/${{ github.repository }}"
+            license=('${{ env.LICENSE }}')
+            source=("\$url/releases/download/${{ env.VERSION }}/${{ needs.setup.outputs.deb_pkg_renamed }}")
+
+            build() {
+                rm control.tar.gz
+                tar xvf data.tar.gz
+            }
+
+            package() {
+                cp -fr usr/ \${pkgdir}
+            }
+          EOF
+          cat ${{ needs.setup.outputs.name_bin }}/PKGBUILD
+          ls -la ${{ needs.setup.outputs.name_bin }}
+
+      - name: create arch package
+        uses: 2m/arch-pkgbuild-builder@v1.17
+        with:
+          debug: true
+          target: pkgbuild
+          pkgname: ${{ needs.setup.outputs.name_bin }}/
+
+      - name: copy deb package && create .spec file
+        run: |
+          mkdir -p ${{ needs.setup.outputs.name_bin }}
+          cp -fr ${{ env.DEB_PKG_PATH }}/${{ needs.setup.outputs.deb_pkg_name}} ${{ needs.setup.outputs.name_bin }}/${{ needs.setup.outputs.deb_pkg_renamed }}
+          cat <<EOF > ./${{ needs.setup.outputs.name_bin }}/rpm.spec
+          Name: ${{ env.NAME }}
+          Version: ${{ env.VERSION }}
+          BuildArch: ${{ env.ARCH }}
+          Release: 1
+          Summary: ${{ env.DESCRIPTION }}
+          Requires: ${{ env.DEPENDENCIES_RPM }}
+          License: ${{ env.LICENSE }}
+          Source0: ${{ needs.setup.outputs.deb_pkg_renamed }}
+
+          %description
+          ${{ env.DESCRIPTION }}
+
+          %prep
+          ar x %{SOURCE0}
+
+          %build
+          rm -rf control.tar.gz
+          tar xvf data.tar.gz
+                      
+          %install
+          cp -fr usr/ %{buildroot}
+
+          %files
+          %{_bindir}/${{ env.NAME }}
+          /usr/share/applications/${{ env.NAME }}.desktop
+          /usr/share/icons/hicolor/**/*
+          EOF
+          cat ${{ needs.setup.outputs.name_bin }}/rpm.spec
+
+      - uses: Antikythera/build-rpm@latest
+        id: build_rpm
+        with:
+          spec_file: ${{ needs.setup.outputs.name_bin }}/rpm.spec
+          sources: |
+            ${{ needs.setup.outputs.name_bin }}/${{ needs.setup.outputs.deb_pkg_renamed }}
+
+      - name: upload arch && rpm release && deb package
+        uses: softprops/action-gh-release@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: v${{ env.VERSION }}
+          files: |
+            ${{needs.setup.outputs.name_bin }}/${{ needs.setup.outputs.arch_pkg_name }}
+            ${{ env.DEB_PKG_PATH }}${{ needs.setup.outputs.deb_pkg_name }}
+            ${{ needs.setup.outputs.rpm_pkg_name }}
+            ${{ needs.setup.outputs.name_bin}}/PKGBUILD
+            ${{ needs.setup.outputs.name_bin }}/rpm.spec
